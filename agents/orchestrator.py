@@ -1,10 +1,12 @@
 """
 agents/orchestrator.py
-Orchestrator agent — coordinates worker agents and produces the final report.
-Orchestrator-worker pattern:
-  1. Parse user query to identify companies.
-  2. For each company, run all 4 worker agents concurrently.
-  3. Synthesise worker outputs into a comprehensive investment report.
+Orchestrator-worker pattern with two routing modes:
+
+  MODE A — Company Analysis: user asks about specific companies
+            → runs 4 parallel workers per company → synthesis report
+
+  MODE B — Portfolio Advisor: user asks what to invest in given budget/target
+            → runs Portfolio Advisor agent → ranked recommendation
 """
 
 from __future__ import annotations
@@ -12,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -21,6 +23,7 @@ from llm_factory import get_llm
 from agents.workers import (
     run_fundamentals_agent,
     run_news_sentiment_agent,
+    run_portfolio_advisor_agent,
     run_price_tech_agent,
     run_risk_agent,
 )
@@ -40,7 +43,42 @@ class WorkerResults:
 
 
 # ──────────────────────────────────────────────
-#  Company extraction
+#  Intent detection
+# ──────────────────────────────────────────────
+
+INTENT_SYSTEM = """You are a query classifier for a stock market assistant.
+
+Classify the user query into ONE of two intents:
+
+1. "portfolio" — user wants to know WHAT to invest in, given:
+   - a budget (dollar amount)  AND/OR
+   - a return target (% gain)  AND/OR
+   - an investment horizon
+   Examples: "what should I invest $500 in?", "how do I get 10% in 3 months?",
+             "best stocks for $200 with 5% return", "I have $1000 to invest"
+
+2. "analysis" — user asks about specific named companies or tickers
+   Examples: "analyse Apple", "should I buy TSLA?", "compare NVDA and AMD"
+
+Return ONLY a JSON object: {"intent": "portfolio"} or {"intent": "analysis"}"""
+
+
+async def detect_intent(query: str) -> str:
+    llm = get_llm(temperature=0)
+    response = await llm.ainvoke([
+        SystemMessage(content=INTENT_SYSTEM),
+        HumanMessage(content=query),
+    ])
+    text = response.content.strip()
+    text = re.sub(r"```[a-z]*\n?", "", text).strip("`").strip()
+    try:
+        return json.loads(text).get("intent", "analysis")
+    except Exception:
+        return "analysis"
+
+
+# ──────────────────────────────────────────────
+#  Company extraction (for analysis mode)
 # ──────────────────────────────────────────────
 
 EXTRACT_SYSTEM = """You are a parser. Extract all company names or stock ticker symbols from the user query.
@@ -50,11 +88,10 @@ If none found, return []."""
 
 async def extract_companies(query: str) -> list[str]:
     llm = get_llm(temperature=0)
-    messages = [
+    response = await llm.ainvoke([
         SystemMessage(content=EXTRACT_SYSTEM),
         HumanMessage(content=query),
-    ]
-    response = await llm.ainvoke(messages)
+    ])
     text = response.content.strip()
     text = re.sub(r"```[a-z]*\n?", "", text).strip("`").strip()
     try:
@@ -65,7 +102,7 @@ async def extract_companies(query: str) -> list[str]:
 
 
 # ──────────────────────────────────────────────
-#  Worker runner (thread-pool safe)
+#  Worker runner
 # ──────────────────────────────────────────────
 
 async def _run_worker_async(fn, query: str) -> str:
@@ -77,16 +114,13 @@ async def _run_worker_async(fn, query: str) -> str:
 
 
 async def analyse_company(company: str, original_query: str) -> WorkerResults:
-    """Run all 4 workers concurrently for a single company."""
     worker_query = f"Analyse {company}. User context: {original_query}"
-
     technical, fundamental, sentiment, risk = await asyncio.gather(
         _run_worker_async(run_price_tech_agent, worker_query),
         _run_worker_async(run_fundamentals_agent, worker_query),
         _run_worker_async(run_news_sentiment_agent, worker_query),
         _run_worker_async(run_risk_agent, worker_query),
     )
-
     return WorkerResults(
         company=company,
         technical=technical,
@@ -97,7 +131,7 @@ async def analyse_company(company: str, original_query: str) -> WorkerResults:
 
 
 # ──────────────────────────────────────────────
-#  Synthesis
+#  Synthesis (analysis mode)
 # ──────────────────────────────────────────────
 
 SYNTHESIS_SYSTEM = """You are a senior investment advisor synthesising multi-agent research reports.
@@ -144,12 +178,10 @@ and does not constitute financial advice."""
 
 async def synthesise_report(results: list[WorkerResults], original_query: str) -> str:
     llm = get_llm(temperature=0.2)
-
     worker_data = ""
     for r in results:
         worker_data += f"""
 === {r.company} ===
-
 [TECHNICAL ANALYSIS]
 {r.technical}
 
@@ -161,19 +193,16 @@ async def synthesise_report(results: list[WorkerResults], original_query: str) -
 
 [RISK ASSESSMENT]
 {r.risk}
-
 """
-
-    messages = [
+    response = await llm.ainvoke([
         SystemMessage(content=SYNTHESIS_SYSTEM),
         HumanMessage(content=f"User question: {original_query}\n\nWorker reports:\n{worker_data}"),
-    ]
-    response = await llm.ainvoke(messages)
+    ])
     return response.content
 
 
 # ──────────────────────────────────────────────
-#  Main orchestrator entry point
+#  Main orchestrator
 # ──────────────────────────────────────────────
 
 async def orchestrate(
@@ -184,13 +213,31 @@ async def orchestrate(
         if status_callback:
             status_callback(msg)
 
+    # ── Step 1: detect intent ──────────────────
+    _status("🧠 Understanding your request...")
+    intent = await detect_intent(query)
+
+    # ── MODE B: Portfolio Advisor ──────────────
+    if intent == "portfolio":
+        _status(
+            "💼 Detected **portfolio query** — activating Portfolio Advisor Agent\n"
+            "  • Screening stocks against your budget & return target\n"
+            "  • Validating momentum with technical indicators\n"
+            "  • Ranking best-fit instruments..."
+        )
+        result = await _run_worker_async(run_portfolio_advisor_agent, query)
+        return result
+
+    # ── MODE A: Company Analysis ───────────────
     _status("🔍 Identifying companies in your query...")
     companies = await extract_companies(query)
 
     if not companies:
         return (
-            "I couldn't identify any company names or ticker symbols in your query. "
-            "Please mention specific companies (e.g. 'Apple', 'TSLA', 'Microsoft')."
+            "I couldn't identify any company names or ticker symbols in your query.\n\n"
+            "**Try one of these formats:**\n"
+            "- Analyse a company: *'Should I buy Apple?'*\n"
+            "- Portfolio recommendation: *'What should I invest $500 in for 5% return in 3 months?'*"
         )
 
     _status(f"✅ Found: **{', '.join(companies)}**")

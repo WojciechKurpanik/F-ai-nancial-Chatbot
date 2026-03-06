@@ -16,6 +16,7 @@ from tools import (
     get_technical_indicators,
     resolve_ticker,
     search_company_news,
+    screen_stocks_by_criteria,
 )
 
 
