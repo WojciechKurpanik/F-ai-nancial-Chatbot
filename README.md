@@ -102,7 +102,7 @@ Without Tavily the News agent will skip live news but all other agents work norm
 ### 3. Run
 
 ```bash
-chainlit run app.py
+chainlit run src/app.py
 ```
 
 Open your browser at **http://localhost:8000**
@@ -124,19 +124,21 @@ Open your browser at **http://localhost:8000**
 
 ```
 stock_agent_app/
-├── app.py                  # Chainlit chat entrypoint
-├── llm_factory.py          # Azure / OpenAI LLM builder
+├── src/
+│   ├── __init__.py
+│   ├── app.py                  # Chainlit chat entrypoint
+│   ├── llm_factory.py          # Azure / OpenAI LLM builder
+│   ├── agents/
+│   │   ├── __init__.py
+│   │   ├── orchestrator.py     # Orchestrator + synthesis
+│   │   └── workers.py          # 4 worker agents
+│   └── tools/
+│       ├── __init__.py
+│       └── stock_tools.py      # yfinance + Tavily tools
 ├── requirements.txt
 ├── .env.example
 ├── .chainlit/
 │   └── config.toml         # UI settings
-├── agents/
-│   ├── __init__.py
-│   ├── orchestrator.py     # Orchestrator + synthesis
-│   └── workers.py          # 4 worker agents
-└── tools/
-    ├── __init__.py
-    └── stock_tools.py      # yfinance + Tavily tools
 ```
 
 ---
