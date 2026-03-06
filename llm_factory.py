@@ -20,7 +20,6 @@ def get_llm(temperature: float = 0.0):
     api_key  = os.environ["AZURE_OPENAI_API_KEY"]
     deploy   = os.environ["AZURE_OPENAI_DEPLOYMENT_NAME"]
 
-    # Ensure the /openai/v1 suffix is present
     if not endpoint.endswith("/openai/v1"):
         if "/openai/v1" not in endpoint:
             endpoint = endpoint.rstrip("/") + "/openai/v1"
@@ -28,7 +27,7 @@ def get_llm(temperature: float = 0.0):
     return ChatOpenAI(
         model=deploy,
         api_key=api_key,
-        base_url=endpoint,   # <-- correct param for langchain-openai >= 1.0
+        base_url=endpoint,
         temperature=temperature,
         max_retries=3,
         timeout=120,
